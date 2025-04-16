@@ -80,65 +80,61 @@ value_pattern = re.compile(r'\b\d{1,3}(?:\.\d+)?\s?%|\b\d?\.\d+\b')
 def extract_structured_results(abstract):
     sentences = re.split(r'(?<=[.!?]) +', abstract)
     results = []
+    seen = set()
+
+    abstract_tasks = set([normalize_task(t) for t in task_pattern.findall(abstract)])
 
     for s in sentences:
-        tasks = set([normalize_task(t) for t in task_pattern.findall(s)])
-        if not tasks:
-            continue
-
         metrics = metric_pattern.findall(s)
         values = value_pattern.findall(s)
-
-        if not metrics or not values:
-            for task in tasks:
-                results.append({
-                    "Sentence": s.strip(),
-                    "Task": task,
-                    "Metric": np.nan,
-                    "Value": np.nan,
-                    "Note": "No metric/value matched"
-                })
-            continue
-
-        if len(metrics) != len(values):
-            print(f"{YELLOW}WARNING: Mismatch between metric and value count: {len(metrics)} vs {len(values)}{RESET}")
-            print(f"{YELLOW}Sentence: {s}{RESET}\n")
-            for task in tasks:
-                results.append({
-                    "Sentence": s.strip(),
-                    "Task": task,
-                    "Metric": np.nan,
-                    "Value": np.nan,
-                    "Note": "Metric/value count mismatch"
-                })
-            continue
 
         cleaned_values = []
         for value in values:
             value_cleaned = value.strip()
             if re.fullmatch(r"\.\d+", value_cleaned):
-                # ".89" → "89.0%"
                 value_cleaned = str(round(float(value_cleaned) * 100, 1)) + "%"
             elif "%" in value_cleaned:
-                # already percent, keep as is
                 pass
             else:
-                # e.g. 0.988 → keep as is
                 value_cleaned = value_cleaned
             cleaned_values.append(value_cleaned)
 
-        for task in tasks:
+        if not metrics or not values:
+            continue
+        if len(metrics) != len(cleaned_values):
+            continue
+
+        sentence_tasks = set([normalize_task(t) for t in task_pattern.findall(s)])
+        matched_tasks = sentence_tasks if sentence_tasks else abstract_tasks
+
+        if "atrial fibrillation" in matched_tasks and "arrhythmia" in matched_tasks:
+            matched_tasks.discard("arrhythmia")
+
+        for task in matched_tasks:
             for metric, value in zip(metrics, cleaned_values):
+                dedup_key = (task, metric.lower(), value)
+                if dedup_key in seen:
+                    continue
+                seen.add(dedup_key)
                 results.append({
                     "Sentence": s.strip(),
                     "Task": task,
                     "Metric": metric.lower(),
                     "Value": value,
-                    "Note": ""
+                    "Note": "cross-sentence match" if not sentence_tasks else ""
                 })
 
-    return results if results else np.nan
+    if not results and abstract_tasks:
+        for task in abstract_tasks:
+            results.append({
+                "Sentence": "",
+                "Task": task,
+                "Metric": np.nan,
+                "Value": np.nan,
+                "Note": "No metric/value in abstract"
+            })
 
+    return results if results else np.nan
 def extract_models(abstract):
     found_models = []
     for pattern, alias in model_keywords.items():
