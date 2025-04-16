@@ -8,13 +8,18 @@ RESET = "\033[0m"
 df = pd.read_csv("ECG_ML_SLR_merged_deduplicated.csv")
 
 task_keywords = [
-    "atrial fibrillation", "arrhythmia", "R-peak detection", "QRS detection",
-    "PVC detection", "AF detection"
+    r"atrial fibrillation",
+    r"arrhythmias?",
+    r"r[- ]?peak detection",
+    r"qrs detection",
+    r"pvc detection",
+    r"af detection",
+    r"\baf\b"
 ]
 
 metric_keywords = [
-    "accuracy", "precision", "recall", "f1[- ]?score", "sensitivity",
-    "specificity", "auc", "detection rate"
+    r"accuracy", r"precision", r"recall", r"f1[- ]?score", r"sensitivity",
+    r"specificity", r"auc", r"detection rate"
 ]
 
 model_keywords = {
@@ -49,12 +54,19 @@ dataset_keywords = {
 
 def normalize_task(task):
     alias_map = {
-        "af detection": "atrial fibrillation",
+        "atrial fibrillation": "atrial fibrillation",
         "atrial fibrillation detection": "atrial fibrillation",
         "detection of af": "atrial fibrillation",
+        "af detection": "atrial fibrillation",
+        "af": "atrial fibrillation",
+        "arrhythmia": "arrhythmia",
+        "arrhythmias": "arrhythmia",
         "arrhythmia classification": "arrhythmia",
-        "heartbeat categorization": "ECG classification",
+        "pvc detection": "PVC detection",
         "pvc classification": "PVC detection",
+        "qrs detection": "QRS detection",
+        "r-peak detection": "R-peak detection",
+        "r peak detection": "R-peak detection",
     }
     return alias_map.get(task.lower(), task)
 
@@ -63,15 +75,14 @@ metric_pattern = re.compile(r'|'.join(metric_keywords), re.IGNORECASE)
 model_pattern = re.compile(r'|'.join(model_keywords.keys()), re.IGNORECASE)
 dataset_pattern = re.compile(r'|'.join(dataset_keywords), re.IGNORECASE)
 
-# Value pattern: 60%, 97.7%, .89 etc.
-value_pattern = re.compile(r'\b\d{1,3}(?:\.\d+)?\s?%|(?<!\d)\.\d+(?!\d)')
+value_pattern = re.compile(r'\b\d{1,3}(?:\.\d+)?\s?%|\b\d?\.\d+\b')
 
 def extract_structured_results(abstract):
     sentences = re.split(r'(?<=[.!?]) +', abstract)
     results = []
 
     for s in sentences:
-        tasks = set([normalize_task(t.lower()) for t in task_pattern.findall(s)])
+        tasks = set([normalize_task(t) for t in task_pattern.findall(s)])
         if not tasks:
             continue
 
@@ -79,20 +90,41 @@ def extract_structured_results(abstract):
         values = value_pattern.findall(s)
 
         if not metrics or not values:
+            for task in tasks:
+                results.append({
+                    "Sentence": s.strip(),
+                    "Task": task,
+                    "Metric": np.nan,
+                    "Value": np.nan,
+                    "Note": "No metric/value matched"
+                })
             continue
 
         if len(metrics) != len(values):
             print(f"{YELLOW}WARNING: Mismatch between metric and value count: {len(metrics)} vs {len(values)}{RESET}")
             print(f"{YELLOW}Sentence: {s}{RESET}\n")
+            for task in tasks:
+                results.append({
+                    "Sentence": s.strip(),
+                    "Task": task,
+                    "Metric": np.nan,
+                    "Value": np.nan,
+                    "Note": "Metric/value count mismatch"
+                })
             continue
 
         cleaned_values = []
         for value in values:
             value_cleaned = value.strip()
-            if value_cleaned.startswith("."):
+            if re.fullmatch(r"\.\d+", value_cleaned):
+                # ".89" → "89.0%"
                 value_cleaned = str(round(float(value_cleaned) * 100, 1)) + "%"
-            elif "%" not in value_cleaned:
-                value_cleaned += "%"
+            elif "%" in value_cleaned:
+                # already percent, keep as is
+                pass
+            else:
+                # e.g. 0.988 → keep as is
+                value_cleaned = value_cleaned
             cleaned_values.append(value_cleaned)
 
         for task in tasks:
@@ -101,7 +133,8 @@ def extract_structured_results(abstract):
                     "Sentence": s.strip(),
                     "Task": task,
                     "Metric": metric.lower(),
-                    "Value": value
+                    "Value": value,
+                    "Note": ""
                 })
 
     return results if results else np.nan
@@ -124,22 +157,28 @@ df["Structured_Results"] = df["Abstract"].apply(extract_structured_results)
 df["Models"] = df["Abstract"].apply(extract_models)
 df["Datasets"] = df["Abstract"].apply(extract_datasets)
 
+def format_row(row, item=None):
+    return {
+        "Title": row["Title"],
+        "Link": row["Link"],
+        "Year": row["Year"],
+        "Abstract": row["Abstract"],
+        "Models": ", ".join(row["Models"]) if isinstance(row["Models"], list) else (row["Models"] or ""),
+        "Datasets": ", ".join(row["Datasets"]) if isinstance(row["Datasets"], list) else (row["Datasets"] or ""),
+        "Task": item["Task"] if item else np.nan,
+        "Metric": item["Metric"] if item else np.nan,
+        "Value": item["Value"] if item else np.nan,
+        "Result Sentence": item["Sentence"] if item else "",
+        "Note": item.get("Note", "") if item else "No task matched"
+    }
+
 structured_rows = []
-for idx, row in df.iterrows():
+
+for _, row in df.iterrows():
     if isinstance(row["Structured_Results"], list):
-        for item in row["Structured_Results"]:
-            structured_rows.append({
-                "Title": row["Title"],
-                "Link": row["Link"],
-                "Year": row["Year"],
-                "Abstract": row["Abstract"],
-                "Models": ", ".join(row["Models"]) if isinstance(row["Models"], list) else row["Models"],
-                "Task": item["Task"],
-                "Metric": item["Metric"],
-                "Value": item["Value"],
-                "Datasets": ", ".join(row["Datasets"]) if isinstance(row["Datasets"], list) else row["Datasets"],
-                "Result Sentence": item["Sentence"]
-            })
+        structured_rows.extend([format_row(row, item) for item in row["Structured_Results"]])
+    else:
+        structured_rows.append(format_row(row))
 
 structured_df = pd.DataFrame(structured_rows)
 structured_df.to_csv("structured_ecg_results.csv", index=False)
